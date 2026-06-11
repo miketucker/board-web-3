@@ -65,6 +65,33 @@ let playedMs = 0;
 let lastTick = performance.now();
 let pauseUnsubscribe: (() => void) | null = null;
 let lastPlayerSummary = "";
+let frameCount = 0;
+let lastFrameLogMs = 0;
+let lastFrameContactCount = -1;
+const FRAME_LOG_INTERVAL_MS = 2000;
+let inputSubscribed = false;
+let inputWatchdog: ReturnType<typeof setInterval> | null = null;
+
+function hasBoardSdkBridge(): boolean {
+  return typeof window.BoardSDK !== "undefined";
+}
+
+function hasBoardTouchBridge(): boolean {
+  return typeof window.boardTouch !== "undefined";
+}
+
+function logInputBridgeState(context: string): void {
+  log(
+    "input",
+    `bridge state (${context})`,
+    [
+      `BoardSDK=${hasBoardSdkBridge()}`,
+      `boardTouch=${hasBoardTouchBridge()}`,
+      `isSubscribed=${Board.input.isSubscribed}`,
+      `callbacks=${inputSubscribed}`,
+    ].join(" · "),
+  );
+}
 
 function onTouchDown(contact: BoardContact): void {
   log("input", "hand down", describeContact(contact));
@@ -83,6 +110,35 @@ function onContactEnded(contact: BoardContact): void {
 }
 
 function onFrame(frameContacts: ReadonlyArray<BoardContact>): void {
+  frameCount++;
+  const now = performance.now();
+  const count = frameContacts.length;
+
+  if (frameCount === 1) {
+    log("input", "onFrame: first frame", `${count} contact(s)`);
+  }
+
+  if (count !== lastFrameContactCount) {
+    log(
+      "input",
+      "onFrame contact count changed",
+      `${lastFrameContactCount < 0 ? "none" : lastFrameContactCount} → ${count}`,
+    );
+    if (count > 0) {
+      log(
+        "input",
+        "onFrame contacts",
+        frameContacts.map(describeContact).join("; "),
+      );
+    }
+    lastFrameContactCount = count;
+  }
+
+  if (count === 0 && now - lastFrameLogMs >= FRAME_LOG_INTERVAL_MS) {
+    lastFrameLogMs = now;
+    log("input", "onFrame heartbeat", `frame #${frameCount}, 0 contacts`);
+  }
+
   const seen = new Set<number>();
 
   for (const contact of frameContacts) {
@@ -215,6 +271,9 @@ function restart(): void {
   prevTouched.clear();
   playedMs = 0;
   lastTick = performance.now();
+  frameCount = 0;
+  lastFrameLogMs = 0;
+  lastFrameContactCount = -1;
   log("system", "game restarted");
 }
 
@@ -326,6 +385,65 @@ function wireDevFallback(): void {
   canvas.addEventListener("pointercancel", endPointer);
 }
 
+function subscribeToInput(context: string): void {
+  if (inputSubscribed) return;
+  Board.input.subscribe(onFrame);
+  inputSubscribed = true;
+  log("input", "subscribed to touch frames", context);
+  logInputBridgeState("after subscribe");
+}
+
+function waitForTouchBridgeThenSubscribe(): void {
+  logInputBridgeState("startup");
+
+  if (hasBoardTouchBridge()) {
+    subscribeToInput("boardTouch already present");
+    return;
+  }
+
+  log(
+    "input",
+    "waiting for boardTouch",
+    "BoardSDK is present but touch bridge is not ready yet",
+  );
+
+  let polls = 0;
+  const poll = setInterval(() => {
+    polls++;
+    if (hasBoardTouchBridge()) {
+      clearInterval(poll);
+      subscribeToInput(`boardTouch ready after ${polls} poll(s)`);
+      return;
+    }
+    if (polls % 5 === 0) {
+      logInputBridgeState(`poll #${polls}`);
+    }
+    if (polls >= 50) {
+      clearInterval(poll);
+      log(
+        "input",
+        "touch bridge timeout",
+        "boardTouch never appeared after 10s — input frames will not arrive",
+      );
+    }
+  }, 200);
+}
+
+function startInputWatchdog(): void {
+  inputWatchdog = setInterval(() => {
+    if (frameCount > 0) return;
+    logInputBridgeState("no frames yet");
+    const snapshot = Board.input.getContacts();
+    if (snapshot.length > 0) {
+      log(
+        "input",
+        "getContacts snapshot",
+        snapshot.map(describeContact).join("; "),
+      );
+    }
+  }, 3000);
+}
+
 function startBoardGame(): void {
   log("system", "started on Board device", `SDK ${Board.sdkVersion}`);
   log(
@@ -333,8 +451,8 @@ function startBoardGame(): void {
     "services ready",
     Board.session.areServicesReady() ? "yes" : "no",
   );
-  Board.input.subscribe(onFrame);
-  log("input", "subscribed to touch frames");
+  waitForTouchBridgeThenSubscribe();
+  startInputWatchdog();
   setupPause();
   updateHud();
   setInterval(updateHud, 2000);
@@ -342,7 +460,8 @@ function startBoardGame(): void {
 
 function teardown(): void {
   if (Board.isOnDevice) {
-    Board.input.unsubscribe(onFrame);
+    if (inputSubscribed) Board.input.unsubscribe(onFrame);
+    inputWatchdog && clearInterval(inputWatchdog);
     pauseUnsubscribe?.();
   }
 }
