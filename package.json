@@ -1,0 +1,19 @@
+{
+  "name": "board-web3",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "pack": "npm run build && web-pack dist --package-id fun.board.boardweb3 --name board-web3 --no-model -o board-web3.webapp.zip && board-connect install board-web3.webapp.zip --launch",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@board.fun/web-sdk": "^1.0.0-beta.3"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2",
+    "vite": "^8.0.12"
+  }
+}
